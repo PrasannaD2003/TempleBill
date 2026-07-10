@@ -81,12 +81,17 @@ async function initDatabase() {
     throw error;
   }
 }
-
 async function seedFromSQL(activePool, dbName) {
-  const sqlFile = path.join(__dirname, '..', 'database', 'temple (1).sql');
+  let sqlFile = path.join(__dirname, 'temple.sql');
   if (!fs.existsSync(sqlFile)) {
-    console.error(`SQL dump file not found at: ${sqlFile}`);
-    return;
+    // Fallback to old location for local backward compatibility
+    sqlFile = path.join(__dirname, '..', 'database', 'temple (1).sql');
+  }
+
+  if (!fs.existsSync(sqlFile)) {
+    const errorMsg = `SQL dump file not found at: ${sqlFile}`;
+    console.error(errorMsg);
+    throw new Error(errorMsg);
   }
 
   const content = fs.readFileSync(sqlFile, 'utf8');
