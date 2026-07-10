@@ -4,8 +4,23 @@ const fs = require('fs');
 require('dotenv').config();
 
 let pool;
+let poolPromise;
+
+async function getPool() {
+  if (!pool) {
+    if (!poolPromise) {
+      poolPromise = initDatabase().catch(err => {
+        poolPromise = null;
+        throw err;
+      });
+    }
+    await poolPromise;
+  }
+  return pool;
+}
 
 async function initDatabase() {
+  const dbName = process.env.DB_NAME || 'temple';
   const connectionConfig = {
     host: process.env.DB_HOST || 'localhost',
     user: process.env.DB_USER || 'root',
@@ -13,17 +28,25 @@ async function initDatabase() {
     port: parseInt(process.env.DB_PORT || '3306', 10),
   };
 
+  let tempPool;
+
   try {
-    // Connect to MySQL server without database first
-    const connection = await mysql.createConnection(connectionConfig);
-    
-    // Create database if not exists
-    const dbName = process.env.DB_NAME || 'temple';
-    await connection.query(`CREATE DATABASE IF NOT EXISTS \`${dbName}\``);
-    await connection.end();
+    const isLocal = connectionConfig.host === 'localhost' || connectionConfig.host === '127.0.0.1';
+
+    if (isLocal) {
+      try {
+        // Connect to MySQL server without database first to create it
+        const connection = await mysql.createConnection(connectionConfig);
+        // Create database if not exists
+        await connection.query(`CREATE DATABASE IF NOT EXISTS \`${dbName}\``);
+        await connection.end();
+      } catch (dbCreateError) {
+        console.warn('Failed to ensure database exists, attempting direct connection:', dbCreateError.message);
+      }
+    }
 
     // Now create the pool with the database specified
-    pool = mysql.createPool({
+    tempPool = mysql.createPool({
       ...connectionConfig,
       database: dbName,
       waitForConnections: true,
@@ -34,7 +57,7 @@ async function initDatabase() {
     console.log(`Connected to MySQL database: ${dbName}`);
 
     // Check if tables exist
-    const [rows] = await pool.query(
+    const [rows] = await tempPool.query(
       `SELECT COUNT(*) as tableCount FROM information_schema.tables WHERE table_schema = ?`,
       [dbName]
     );
@@ -42,18 +65,24 @@ async function initDatabase() {
     const tableCount = rows[0].tableCount;
     if (tableCount === 0) {
       console.log('Database tables not found. Seeding from SQL dump...');
-      await seedFromSQL(dbName);
+      await seedFromSQL(tempPool, dbName);
     } else {
       console.log(`Database already initialized with ${tableCount} tables.`);
     }
 
+    // Only assign to global pool when everything is fully ready!
+    pool = tempPool;
+
   } catch (error) {
     console.error('Failed to initialize database:', error.message);
+    if (tempPool) {
+      await tempPool.end().catch(() => {});
+    }
     throw error;
   }
 }
 
-async function seedFromSQL(dbName) {
+async function seedFromSQL(activePool, dbName) {
   const sqlFile = path.join(__dirname, '..', 'database', 'temple (1).sql');
   if (!fs.existsSync(sqlFile)) {
     console.error(`SQL dump file not found at: ${sqlFile}`);
@@ -127,7 +156,7 @@ async function seedFromSQL(dbName) {
   }
 
   // Execute all queries sequentially
-  const conn = await pool.getConnection();
+  const conn = await activePool.getConnection();
   try {
     await conn.beginTransaction();
     // Disable foreign keys temporarily during seeding
@@ -156,28 +185,18 @@ async function seedFromSQL(dbName) {
   }
 }
 
-// Initialize database connection
-initDatabase();
-
 module.exports = {
   // A wrapper helper to execute queries
   query: async (sql, params) => {
-    if (!pool) {
-      // Wait for pool to initialize
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
-    return pool.query(sql, params);
+    const activePool = await getPool();
+    return activePool.query(sql, params);
   },
   execute: async (sql, params) => {
-    if (!pool) {
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
-    return pool.execute(sql, params);
+    const activePool = await getPool();
+    return activePool.execute(sql, params);
   },
   getConnection: async () => {
-    if (!pool) {
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
-    return pool.getConnection();
+    const activePool = await getPool();
+    return activePool.getConnection();
   }
 };
